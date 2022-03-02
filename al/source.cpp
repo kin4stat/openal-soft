@@ -427,7 +427,7 @@ al::optional<VoicePos> GetSampleOffset(al::deque<ALbufferQueueItem> &BufferList,
         BufferFmt = item.mBuffer;
         if(BufferFmt) break;
     }
-    if(!BufferFmt)
+    if(!BufferFmt || BufferFmt->mCallback)
         return al::nullopt;
 
     /* Get sample frame offset */
@@ -477,7 +477,7 @@ al::optional<VoicePos> GetSampleOffset(al::deque<ALbufferQueueItem> &BufferList,
         if(item.mSampleLen > offset-totalBufferLen)
         {
             /* Offset is in this buffer */
-            return al::make_optional(VoicePos{offset-totalBufferLen, frac, &item});
+            return VoicePos{offset-totalBufferLen, frac, &item};
         }
         totalBufferLen += item.mSampleLen;
     }
@@ -511,7 +511,7 @@ void InitVoice(Voice *voice, ALsource *source, ALbufferQueueItem *BufferList, AL
 
     voice->prepare(device);
 
-    source->mPropsDirty.test_and_clear(std::memory_order_acq_rel);
+    source->mPropsDirty = false;
     UpdateSourceProps(source, voice, context);
 
     voice->mSourceID.store(source->id, std::memory_order_release);
@@ -679,16 +679,6 @@ inline ALenum GetSourceState(ALsource *source, Voice *voice)
     return source->state;
 }
 
-/**
- * Returns if the source should specify an update, given the context's
- * deferring state and the source's last known state.
- */
-inline bool SourceShouldUpdate(ALsource *source, ALCcontext *context)
-{
-    return !context->mDeferUpdates.load(std::memory_order_acquire) &&
-           IsPlayingOrPaused(source);
-}
-
 
 bool EnsureSources(ALCcontext *context, size_t needed)
 {
@@ -742,19 +732,16 @@ void FreeSource(ALCcontext *context, ALsource *source)
     const size_t lidx{id >> 6};
     const ALuint slidx{id & 0x3f};
 
-    if(IsPlayingOrPaused(source))
+    if(Voice *voice{GetSourceVoice(source, context)})
     {
-        if(Voice *voice{GetSourceVoice(source, context)})
-        {
-            VoiceChange *vchg{GetVoiceChanger(context)};
+        VoiceChange *vchg{GetVoiceChanger(context)};
 
-            voice->mPendingChange.store(true, std::memory_order_relaxed);
-            vchg->mVoice = voice;
-            vchg->mSourceID = source->id;
-            vchg->mState = VChangeState::Stop;
+        voice->mPendingChange.store(true, std::memory_order_relaxed);
+        vchg->mVoice = voice;
+        vchg->mSourceID = source->id;
+        vchg->mState = VChangeState::Stop;
 
-            SendVoiceChanges(context, vchg);
-        }
+        SendVoiceChanges(context, vchg);
     }
 
     al::destroy_at(source);
@@ -1124,34 +1111,60 @@ ALuint DoubleValsByProp(ALenum prop)
 }
 
 
-bool SetSourcefv(ALsource *Source, ALCcontext *Context, SourceProp prop, const al::span<const float> values);
-bool SetSourceiv(ALsource *Source, ALCcontext *Context, SourceProp prop, const al::span<const int> values);
-bool SetSourcei64v(ALsource *Source, ALCcontext *Context, SourceProp prop, const al::span<const int64_t> values);
+void SetSourcefv(ALsource *Source, ALCcontext *Context, SourceProp prop, const al::span<const float> values);
+void SetSourceiv(ALsource *Source, ALCcontext *Context, SourceProp prop, const al::span<const int> values);
+void SetSourcei64v(ALsource *Source, ALCcontext *Context, SourceProp prop, const al::span<const int64_t> values);
 
 #define CHECKSIZE(v, s) do { \
     if LIKELY((v).size() == (s) || (v).size() == MaxValues) break;            \
     Context->setError(AL_INVALID_ENUM,                                        \
         "Property 0x%04x expects %d value(s), got %zu", prop, (s),            \
         (v).size());                                                          \
-    return false;                                                             \
+    return;                                                                   \
 } while(0)
 #define CHECKVAL(x) do {                                                      \
     if LIKELY(x) break;                                                       \
     Context->setError(AL_INVALID_VALUE, "Value out of range");                \
-    return false;                                                             \
+    return;                                                                   \
 } while(0)
 
-bool UpdateSourceProps(ALsource *source, ALCcontext *context)
+void UpdateSourceProps(ALsource *source, ALCcontext *context)
 {
-    Voice *voice;
-    if(SourceShouldUpdate(source, context) && (voice=GetSourceVoice(source, context)) != nullptr)
-        UpdateSourceProps(source, voice, context);
-    else
-        source->mPropsDirty.set(std::memory_order_release);
-    return true;
+    if(!context->mDeferUpdates)
+    {
+        if(Voice *voice{GetSourceVoice(source, context)})
+        {
+            UpdateSourceProps(source, voice, context);
+            return;
+        }
+    }
+    source->mPropsDirty = true;
+}
+#ifdef ALSOFT_EAX
+void CommitAndUpdateSourceProps(ALsource *source, ALCcontext *context)
+{
+    if(!context->mDeferUpdates)
+    {
+        if(source->eax_is_initialized())
+            source->eax_commit();
+        if(Voice *voice{GetSourceVoice(source, context)})
+        {
+            UpdateSourceProps(source, voice, context);
+            return;
+        }
+    }
+    source->mPropsDirty = true;
 }
 
-bool SetSourcefv(ALsource *Source, ALCcontext *Context, SourceProp prop, const al::span<const float> values)
+#else
+
+inline void CommitAndUpdateSourceProps(ALsource *source, ALCcontext *context)
+{ UpdateSourceProps(source, context); }
+#endif
+
+
+void SetSourcefv(ALsource *Source, ALCcontext *Context, SourceProp prop,
+    const al::span<const float> values)
 {
     int ival;
 
@@ -1161,7 +1174,7 @@ bool SetSourcefv(ALsource *Source, ALCcontext *Context, SourceProp prop, const a
     case AL_SEC_OFFSET_LATENCY_SOFT:
     case AL_SEC_OFFSET_CLOCK_SOFT:
         /* Query only */
-        SETERR_RETURN(Context, AL_INVALID_OPERATION, false,
+        SETERR_RETURN(Context, AL_INVALID_OPERATION,,
             "Setting read-only source property 0x%04x", prop);
 
     case AL_PITCH:
@@ -1176,20 +1189,14 @@ bool SetSourcefv(ALsource *Source, ALCcontext *Context, SourceProp prop, const a
         CHECKVAL(values[0] >= 0.0f && values[0] <= 360.0f);
 
         Source->InnerAngle = values[0];
-#ifdef ALSOFT_EAX
-        Source->eax_commit();
-#endif // ALSOFT_EAX
-        return UpdateSourceProps(Source, Context);
+        return CommitAndUpdateSourceProps(Source, Context);
 
     case AL_CONE_OUTER_ANGLE:
         CHECKSIZE(values, 1);
         CHECKVAL(values[0] >= 0.0f && values[0] <= 360.0f);
 
         Source->OuterAngle = values[0];
-#ifdef ALSOFT_EAX
-        Source->eax_commit();
-#endif // ALSOFT_EAX
-        return UpdateSourceProps(Source, Context);
+        return CommitAndUpdateSourceProps(Source, Context);
 
     case AL_GAIN:
         CHECKSIZE(values, 1);
@@ -1203,30 +1210,21 @@ bool SetSourcefv(ALsource *Source, ALCcontext *Context, SourceProp prop, const a
         CHECKVAL(values[0] >= 0.0f);
 
         Source->MaxDistance = values[0];
-#ifdef ALSOFT_EAX
-        Source->eax_commit();
-#endif // ALSOFT_EAX
-        return UpdateSourceProps(Source, Context);
+        return CommitAndUpdateSourceProps(Source, Context);
 
     case AL_ROLLOFF_FACTOR:
         CHECKSIZE(values, 1);
         CHECKVAL(values[0] >= 0.0f);
 
         Source->RolloffFactor = values[0];
-#ifdef ALSOFT_EAX
-        Source->eax_commit();
-#endif // ALSOFT_EAX
-        return UpdateSourceProps(Source, Context);
+        return CommitAndUpdateSourceProps(Source, Context);
 
     case AL_REFERENCE_DISTANCE:
         CHECKSIZE(values, 1);
         CHECKVAL(values[0] >= 0.0f);
 
         Source->RefDistance = values[0];
-#ifdef ALSOFT_EAX
-        Source->eax_commit();
-#endif // ALSOFT_EAX
-        return UpdateSourceProps(Source, Context);
+        return CommitAndUpdateSourceProps(Source, Context);
 
     case AL_MIN_GAIN:
         CHECKSIZE(values, 1);
@@ -1285,18 +1283,15 @@ bool SetSourcefv(ALsource *Source, ALCcontext *Context, SourceProp prop, const a
 
         if(Voice *voice{GetSourceVoice(Source, Context)})
         {
-            if(voice->mFlags.test(VoiceIsCallback))
-                SETERR_RETURN(Context, AL_INVALID_VALUE, false,
-                    "Source offset for callback is invalid");
             auto vpos = GetSampleOffset(Source->mQueue, prop, values[0]);
-            if(!vpos) SETERR_RETURN(Context, AL_INVALID_VALUE, false, "Invalid offset");
+            if(!vpos) SETERR_RETURN(Context, AL_INVALID_VALUE,, "Invalid offset");
 
             if(SetVoiceOffset(voice, *vpos, Source, Context, Context->mALDevice.get()))
-                return true;
+                return;
         }
         Source->OffsetType = prop;
         Source->Offset = values[0];
-        return true;
+        return;
 
     case AL_SOURCE_RADIUS:
         CHECKSIZE(values, 1);
@@ -1328,10 +1323,7 @@ bool SetSourcefv(ALsource *Source, ALCcontext *Context, SourceProp prop, const a
         Source->Position[0] = values[0];
         Source->Position[1] = values[1];
         Source->Position[2] = values[2];
-#ifdef ALSOFT_EAX
-        Source->eax_commit();
-#endif // ALSOFT_EAX
-        return UpdateSourceProps(Source, Context);
+        return CommitAndUpdateSourceProps(Source, Context);
 
     case AL_VELOCITY:
         CHECKSIZE(values, 3);
@@ -1340,10 +1332,7 @@ bool SetSourcefv(ALsource *Source, ALCcontext *Context, SourceProp prop, const a
         Source->Velocity[0] = values[0];
         Source->Velocity[1] = values[1];
         Source->Velocity[2] = values[2];
-#ifdef ALSOFT_EAX
-        Source->eax_commit();
-#endif // ALSOFT_EAX
-        return UpdateSourceProps(Source, Context);
+        return CommitAndUpdateSourceProps(Source, Context);
 
     case AL_DIRECTION:
         CHECKSIZE(values, 3);
@@ -1352,10 +1341,7 @@ bool SetSourcefv(ALsource *Source, ALCcontext *Context, SourceProp prop, const a
         Source->Direction[0] = values[0];
         Source->Direction[1] = values[1];
         Source->Direction[2] = values[2];
-#ifdef ALSOFT_EAX
-        Source->eax_commit();
-#endif // ALSOFT_EAX
-        return UpdateSourceProps(Source, Context);
+        return CommitAndUpdateSourceProps(Source, Context);
 
     case AL_ORIENTATION:
         CHECKSIZE(values, 6);
@@ -1405,10 +1391,11 @@ bool SetSourcefv(ALsource *Source, ALCcontext *Context, SourceProp prop, const a
 
     ERR("Unexpected property: 0x%04x\n", prop);
     Context->setError(AL_INVALID_ENUM, "Invalid source float property 0x%04x", prop);
-    return false;
+    return;
 }
 
-bool SetSourceiv(ALsource *Source, ALCcontext *Context, SourceProp prop, const al::span<const int> values)
+void SetSourceiv(ALsource *Source, ALCcontext *Context, SourceProp prop,
+    const al::span<const int> values)
 {
     ALCdevice *device{Context->mALDevice.get()};
     ALeffectslot *slot{nullptr};
@@ -1425,7 +1412,7 @@ bool SetSourceiv(ALsource *Source, ALCcontext *Context, SourceProp prop, const a
     case AL_BYTE_LENGTH_SOFT:
     case AL_SAMPLE_LENGTH_SOFT:
         /* Query only */
-        SETERR_RETURN(Context, AL_INVALID_OPERATION, false,
+        SETERR_RETURN(Context, AL_INVALID_OPERATION,,
             "Setting read-only source property 0x%04x", prop);
 
     case AL_SOURCE_RELATIVE:
@@ -1433,40 +1420,33 @@ bool SetSourceiv(ALsource *Source, ALCcontext *Context, SourceProp prop, const a
         CHECKVAL(values[0] == AL_FALSE || values[0] == AL_TRUE);
 
         Source->HeadRelative = values[0] != AL_FALSE;
-#ifdef ALSOFT_EAX
-        Source->eax_commit();
-#endif // ALSOFT_EAX
-        return UpdateSourceProps(Source, Context);
+        return CommitAndUpdateSourceProps(Source, Context);
 
     case AL_LOOPING:
         CHECKSIZE(values, 1);
         CHECKVAL(values[0] == AL_FALSE || values[0] == AL_TRUE);
 
         Source->Looping = values[0] != AL_FALSE;
-        if(IsPlayingOrPaused(Source))
+        if(Voice *voice{GetSourceVoice(Source, Context)})
         {
-            if(Voice *voice{GetSourceVoice(Source, Context)})
-            {
-                if(Source->Looping)
-                    voice->mLoopBuffer.store(&Source->mQueue.front(), std::memory_order_release);
-                else
-                    voice->mLoopBuffer.store(nullptr, std::memory_order_release);
+            if(Source->Looping)
+                voice->mLoopBuffer.store(&Source->mQueue.front(), std::memory_order_release);
+            else
+                voice->mLoopBuffer.store(nullptr, std::memory_order_release);
 
-                /* If the source is playing, wait for the current mix to finish
-                 * to ensure it isn't currently looping back or reaching the
-                 * end.
-                 */
-                device->waitForMix();
-            }
+            /* If the source is playing, wait for the current mix to finish to
+             * ensure it isn't currently looping back or reaching the end.
+             */
+            device->waitForMix();
         }
-        return true;
+        return;
 
     case AL_BUFFER:
         CHECKSIZE(values, 1);
         {
             const ALenum state{GetSourceState(Source, GetSourceVoice(Source, Context))};
             if(state == AL_PLAYING || state == AL_PAUSED)
-                SETERR_RETURN(Context, AL_INVALID_OPERATION, false,
+                SETERR_RETURN(Context, AL_INVALID_OPERATION,,
                     "Setting buffer on playing or paused source %u", Source->id);
         }
         if(values[0])
@@ -1474,13 +1454,13 @@ bool SetSourceiv(ALsource *Source, ALCcontext *Context, SourceProp prop, const a
             std::lock_guard<std::mutex> _{device->BufferLock};
             ALbuffer *buffer{LookupBuffer(device, static_cast<ALuint>(values[0]))};
             if(!buffer)
-                SETERR_RETURN(Context, AL_INVALID_VALUE, false, "Invalid buffer ID %u",
+                SETERR_RETURN(Context, AL_INVALID_VALUE,, "Invalid buffer ID %u",
                     static_cast<ALuint>(values[0]));
             if(buffer->MappedAccess && !(buffer->MappedAccess&AL_MAP_PERSISTENT_BIT_SOFT))
-                SETERR_RETURN(Context, AL_INVALID_OPERATION, false,
+                SETERR_RETURN(Context, AL_INVALID_OPERATION,,
                     "Setting non-persistently mapped buffer %u", buffer->id);
             if(buffer->mCallback && ReadRef(buffer->ref) != 0)
-                SETERR_RETURN(Context, AL_INVALID_OPERATION, false,
+                SETERR_RETURN(Context, AL_INVALID_OPERATION,,
                     "Setting already-set callback buffer %u", buffer->id);
 
             /* Add the selected buffer to a one-item queue */
@@ -1513,7 +1493,7 @@ bool SetSourceiv(ALsource *Source, ALCcontext *Context, SourceProp prop, const a
             if(ALbuffer *buffer{item.mBuffer})
                 DecrementRef(buffer->ref);
         }
-        return true;
+        return;
 
     case AL_SEC_OFFSET:
     case AL_SAMPLE_OFFSET:
@@ -1523,18 +1503,15 @@ bool SetSourceiv(ALsource *Source, ALCcontext *Context, SourceProp prop, const a
 
         if(Voice *voice{GetSourceVoice(Source, Context)})
         {
-            if(voice->mFlags.test(VoiceIsCallback))
-                SETERR_RETURN(Context, AL_INVALID_VALUE, false,
-                    "Source offset for callback is invalid");
             auto vpos = GetSampleOffset(Source->mQueue, prop, values[0]);
-            if(!vpos) SETERR_RETURN(Context, AL_INVALID_VALUE, false, "Invalid source offset");
+            if(!vpos) SETERR_RETURN(Context, AL_INVALID_VALUE,, "Invalid source offset");
 
             if(SetVoiceOffset(voice, *vpos, Source, Context, device))
-                return true;
+                return;
         }
         Source->OffsetType = prop;
         Source->Offset = values[0];
-        return true;
+        return;
 
     case AL_DIRECT_FILTER:
         CHECKSIZE(values, 1);
@@ -1543,7 +1520,7 @@ bool SetSourceiv(ALsource *Source, ALCcontext *Context, SourceProp prop, const a
             std::lock_guard<std::mutex> _{device->FilterLock};
             ALfilter *filter{LookupFilter(device, static_cast<ALuint>(values[0]))};
             if(!filter)
-                SETERR_RETURN(Context, AL_INVALID_VALUE, false, "Invalid filter ID %u",
+                SETERR_RETURN(Context, AL_INVALID_VALUE,, "Invalid filter ID %u",
                     static_cast<ALuint>(values[0]));
             Source->Direct.Gain = filter->Gain;
             Source->Direct.GainHF = filter->GainHF;
@@ -1591,7 +1568,7 @@ bool SetSourceiv(ALsource *Source, ALCcontext *Context, SourceProp prop, const a
         }
         Context->setError(AL_INVALID_VALUE, "Unsupported AL_DIRECT_CHANNELS_SOFT: 0x%04x\n",
             values[0]);
-        return false;
+        return;
 
     case AL_DISTANCE_MODEL:
         CHECKSIZE(values, 1);
@@ -1599,11 +1576,11 @@ bool SetSourceiv(ALsource *Source, ALCcontext *Context, SourceProp prop, const a
         {
             Source->mDistanceModel = *model;
             if(Context->mSourceDistanceModel)
-                return UpdateSourceProps(Source, Context);
-            return true;
+                UpdateSourceProps(Source, Context);
+            return;
         }
         Context->setError(AL_INVALID_VALUE, "Distance model out of range: 0x%04x", values[0]);
-        return false;
+        return;
 
     case AL_SOURCE_RESAMPLER_SOFT:
         CHECKSIZE(values, 1);
@@ -1621,37 +1598,39 @@ bool SetSourceiv(ALsource *Source, ALCcontext *Context, SourceProp prop, const a
         }
         Context->setError(AL_INVALID_VALUE, "Unsupported AL_SOURCE_SPATIALIZE_SOFT: 0x%04x\n",
             values[0]);
-        return false;
+        return;
 
     case AL_STEREO_MODE_SOFT:
         CHECKSIZE(values, 1);
         {
             const ALenum state{GetSourceState(Source, GetSourceVoice(Source, Context))};
             if(state == AL_PLAYING || state == AL_PAUSED)
-                SETERR_RETURN(Context, AL_INVALID_OPERATION, false,
-                    "Setting buffer on playing or paused source %u", Source->id);
+                SETERR_RETURN(Context, AL_INVALID_OPERATION,,
+                    "Modifying stereo mode on playing or paused source %u", Source->id);
         }
         if(auto mode = StereoModeFromEnum(values[0]))
         {
             Source->mStereoMode = *mode;
-            return true;
+            return;
         }
-        return false;
+        Context->setError(AL_INVALID_VALUE, "Unsupported AL_STEREO_MODE_SOFT: 0x%04x\n",
+            values[0]);
+        return;
 
     case AL_AUXILIARY_SEND_FILTER:
         CHECKSIZE(values, 3);
         slotlock = std::unique_lock<std::mutex>{Context->mEffectSlotLock};
         if(values[0] && (slot=LookupEffectSlot(Context, static_cast<ALuint>(values[0]))) == nullptr)
-            SETERR_RETURN(Context, AL_INVALID_VALUE, false, "Invalid effect ID %u", values[0]);
+            SETERR_RETURN(Context, AL_INVALID_VALUE,, "Invalid effect ID %u", values[0]);
         if(static_cast<ALuint>(values[1]) >= device->NumAuxSends)
-            SETERR_RETURN(Context, AL_INVALID_VALUE, false, "Invalid send %u", values[1]);
+            SETERR_RETURN(Context, AL_INVALID_VALUE,, "Invalid send %u", values[1]);
 
         if(values[2])
         {
             std::lock_guard<std::mutex> _{device->FilterLock};
             ALfilter *filter{LookupFilter(device, static_cast<ALuint>(values[2]))};
             if(!filter)
-                SETERR_RETURN(Context, AL_INVALID_VALUE, false, "Invalid filter ID %u", values[2]);
+                SETERR_RETURN(Context, AL_INVALID_VALUE,, "Invalid filter ID %u", values[2]);
 
             auto &send = Source->Send[static_cast<ALuint>(values[1])];
             send.Gain = filter->Gain;
@@ -1684,7 +1663,7 @@ bool SetSourceiv(ALsource *Source, ALCcontext *Context, SourceProp prop, const a
              */
             Voice *voice{GetSourceVoice(Source, Context)};
             if(voice) UpdateSourceProps(Source, voice, Context);
-            else Source->mPropsDirty.set(std::memory_order_release);
+            else Source->mPropsDirty = true;
         }
         else
         {
@@ -1694,7 +1673,7 @@ bool SetSourceiv(ALsource *Source, ALCcontext *Context, SourceProp prop, const a
             Source->Send[static_cast<ALuint>(values[1])].Slot = slot;
             UpdateSourceProps(Source, Context);
         }
-        return true;
+        return;
 
 
     /* 1x float */
@@ -1750,10 +1729,11 @@ bool SetSourceiv(ALsource *Source, ALCcontext *Context, SourceProp prop, const a
 
     ERR("Unexpected property: 0x%04x\n", prop);
     Context->setError(AL_INVALID_ENUM, "Invalid source integer property 0x%04x", prop);
-    return false;
+    return;
 }
 
-bool SetSourcei64v(ALsource *Source, ALCcontext *Context, SourceProp prop, const al::span<const int64_t> values)
+void SetSourcei64v(ALsource *Source, ALCcontext *Context, SourceProp prop,
+    const al::span<const int64_t> values)
 {
     float fvals[MaxValues];
     int   ivals[MaxValues];
@@ -1769,7 +1749,7 @@ bool SetSourcei64v(ALsource *Source, ALCcontext *Context, SourceProp prop, const
     case AL_SAMPLE_OFFSET_LATENCY_SOFT:
     case AL_SAMPLE_OFFSET_CLOCK_SOFT:
         /* Query only */
-        SETERR_RETURN(Context, AL_INVALID_OPERATION, false,
+        SETERR_RETURN(Context, AL_INVALID_OPERATION,,
             "Setting read-only source property 0x%04x", prop);
 
     /* 1x int */
@@ -1863,11 +1843,19 @@ bool SetSourcei64v(ALsource *Source, ALCcontext *Context, SourceProp prop, const
 
     ERR("Unexpected property: 0x%04x\n", prop);
     Context->setError(AL_INVALID_ENUM, "Invalid source integer64 property 0x%04x", prop);
-    return false;
+    return;
 }
 
 #undef CHECKVAL
+#undef CHECKSIZE
 
+#define CHECKSIZE(v, s) do { \
+    if LIKELY((v).size() == (s) || (v).size() == MaxValues) break;            \
+    Context->setError(AL_INVALID_ENUM,                                        \
+        "Property 0x%04x expects %d value(s), got %zu", prop, (s),            \
+        (v).size());                                                          \
+    return false;                                                             \
+} while(0)
 
 bool GetSourcedv(ALsource *Source, ALCcontext *Context, SourceProp prop, const al::span<double> values);
 bool GetSourceiv(ALsource *Source, ALCcontext *Context, SourceProp prop, const al::span<int> values);
@@ -3139,7 +3127,8 @@ START_API_FUNC
             cur->mState = VChangeState::Play;
             source->state = AL_PLAYING;
 #ifdef ALSOFT_EAX
-            source->eax_commit();
+            if(source->eax_is_initialized())
+                source->eax_commit();
 #endif // ALSOFT_EAX
             continue;
 
@@ -3158,7 +3147,8 @@ START_API_FUNC
             assert(voice == nullptr);
             cur->mOldVoice = nullptr;
 #ifdef ALSOFT_EAX
-            source->eax_commit();
+            if(source->eax_is_initialized())
+                source->eax_commit();
 #endif // ALSOFT_EAX
             break;
         }
@@ -3613,8 +3603,6 @@ ALsource::ALsource()
         send.GainLF = 1.0f;
         send.LFReference = HIGHPASSFREQREF;
     }
-
-    mPropsDirty.test_and_clear(std::memory_order_relaxed);
 }
 
 ALsource::~ALsource()
@@ -3633,18 +3621,47 @@ ALsource::~ALsource()
 void UpdateAllSourceProps(ALCcontext *context)
 {
     std::lock_guard<std::mutex> _{context->mSourceLock};
-    auto voicelist = context->getVoicesSpan();
-    ALuint vidx{0u};
-    for(Voice *voice : voicelist)
+#ifdef ALSOFT_EAX
+    if(context->has_eax())
     {
-        ALuint sid{voice->mSourceID.load(std::memory_order_acquire)};
-        ALsource *source = sid ? LookupSource(context, sid) : nullptr;
-        if(source && source->VoiceIdx == vidx)
+        /* If EAX is enabled, we need to go through and commit all sources' EAX
+         * changes, along with updating its voice, if any.
+         */
+        for(auto &sublist : context->mSourceList)
         {
-            if(source->mPropsDirty.test_and_clear(std::memory_order_acq_rel))
-                UpdateSourceProps(source, voice, context);
+            uint64_t usemask{~sublist.FreeMask};
+            while(usemask)
+            {
+                const int idx{al::countr_zero(usemask)};
+                usemask &= ~(1_u64 << idx);
+
+                ALsource *source{sublist.Sources + idx};
+                source->eax_commit();
+
+                if(Voice *voice{GetSourceVoice(source, context)})
+                {
+                    if(std::exchange(source->mPropsDirty, false))
+                        UpdateSourceProps(source, voice, context);
+                }
+            }
         }
-        ++vidx;
+    }
+    else
+#endif
+    {
+        auto voicelist = context->getVoicesSpan();
+        ALuint vidx{0u};
+        for(Voice *voice : voicelist)
+        {
+            ALuint sid{voice->mSourceID.load(std::memory_order_acquire)};
+            ALsource *source = sid ? LookupSource(context, sid) : nullptr;
+            if(source && source->VoiceIdx == vidx)
+            {
+                if(std::exchange(source->mPropsDirty, false))
+                    UpdateSourceProps(source, voice, context);
+            }
+            ++vidx;
+        }
     }
 }
 
@@ -3654,8 +3671,8 @@ SourceSubList::~SourceSubList()
     while(usemask)
     {
         const int idx{al::countr_zero(usemask)};
-        al::destroy_at(Sources+idx);
         usemask &= ~(1_u64 << idx);
+        al::destroy_at(Sources+idx);
     }
     FreeMask = ~usemask;
     al_free(Sources);
@@ -3703,6 +3720,16 @@ public:
 }; // EaxSourceSendException
 
 
+void EaxUpdateSourceVoice(ALsource *source, ALCcontext *context)
+{
+    if(Voice *voice{GetSourceVoice(source, context)})
+    {
+        if(std::exchange(source->mPropsDirty, false))
+            UpdateSourceProps(source, voice, context);
+    }
+}
+
+
 void ALsource::eax_initialize(ALCcontext *context) noexcept
 {
     assert(context);
@@ -3731,33 +3758,19 @@ void ALsource::eax_update_filters()
     eax_update_filters_internal();
 }
 
-void ALsource::eax_update(
-    EaxContextSharedDirtyFlags dirty_flags)
+void ALsource::eax_update(EaxContextSharedDirtyFlags)
 {
-    if (dirty_flags.primary_fx_slot_id)
-    {
-        if (eax_uses_primary_id_)
-        {
-            eax_update_primary_fx_slot_id();
-        }
-    }
-}
-
-void ALsource::eax_commit()
-{
-    if (!eax_is_initialized())
-        return;
-
-    eax_apply_deferred();
+    /* NOTE: EaxContextSharedDirtyFlags only has one flag (primary_fx_slot_id),
+     * which must be true for this to be called.
+     */
+    if(eax_uses_primary_id_)
+        eax_update_primary_fx_slot_id();
 }
 
 void ALsource::eax_commit_and_update()
 {
-    if (!eax_is_initialized())
-        return;
-
     eax_apply_deferred();
-    UpdateSourceProps(this, eax_al_context_);
+    EaxUpdateSourceVoice(this, eax_al_context_);
 }
 
 ALsource* ALsource::eax_lookup_source(
@@ -3776,6 +3789,8 @@ void ALsource::eax_fail(
 
 void ALsource::eax_set_source_defaults() noexcept
 {
+    eax1_.fMix = EAX_REVERBMIX_USEDISTANCE;
+
     eax_.source.lDirect = EAXSOURCE_DEFAULTDIRECT;
     eax_.source.lDirectHF = EAXSOURCE_DEFAULTDIRECTHF;
     eax_.source.lRoom = EAXSOURCE_DEFAULTROOM;
@@ -3882,12 +3897,10 @@ EaxAlLowPassParam ALsource::eax_create_direct_filter_param() const noexcept
         }
     }
 
-    const auto max_gain = eax_al_context_->eax_get_max_filter_gain();
-
     const auto al_low_pass_param = EaxAlLowPassParam
     {
-        clamp(level_mb_to_gain(gain_mb), 0.0F, max_gain),
-        clamp(level_mb_to_gain(gain_hf_mb), 0.0F, max_gain)
+        level_mb_to_gain(gain_mb),
+        minf(level_mb_to_gain(gain_hf_mb), 1.0f)
     };
 
     return al_low_pass_param;
@@ -3935,12 +3948,10 @@ EaxAlLowPassParam ALsource::eax_create_room_filter_param(
 
         0.0F;
 
-    const auto max_gain = eax_al_context_->eax_get_max_filter_gain();
-
     const auto al_low_pass_param = EaxAlLowPassParam
     {
-        clamp(level_mb_to_gain(gain_mb), 0.0F, max_gain),
-        clamp(level_mb_to_gain(gain_hf_mb), 0.0F, max_gain)
+        level_mb_to_gain(gain_mb),
+        minf(level_mb_to_gain(gain_hf_mb), 1.0f)
     };
 
     return al_low_pass_param;
@@ -3970,7 +3981,7 @@ void ALsource::eax_set_fx_slots()
         if (fx_slot_index.has_value())
         {
             eax_has_active_fx_slots_ = true;
-            eax_active_fx_slots_[fx_slot_index] = true;
+            eax_active_fx_slots_[*fx_slot_index] = true;
         }
     }
 
@@ -3998,7 +4009,7 @@ void ALsource::eax_update_direct_filter_internal()
     Direct.HFReference = LOWPASSFREQREF;
     Direct.GainLF = 1.0f;
     Direct.LFReference = HIGHPASSFREQREF;
-    mPropsDirty.set(std::memory_order_release);
+    mPropsDirty = true;
 }
 
 void ALsource::eax_update_room_filters_internal()
@@ -4039,7 +4050,7 @@ void ALsource::eax_update_primary_fx_slot_id()
 
     if (previous_primary_fx_slot_index.has_value())
     {
-        const auto fx_slot_index = previous_primary_fx_slot_index.get();
+        const auto fx_slot_index = previous_primary_fx_slot_index.value();
         eax_active_fx_slots_[fx_slot_index] = false;
 
         eax_set_al_source_send(nullptr, fx_slot_index, EaxAlLowPassParam{1.0f, 1.0f});
@@ -4047,7 +4058,7 @@ void ALsource::eax_update_primary_fx_slot_id()
 
     if (primary_fx_slot_index.has_value())
     {
-        const auto fx_slot_index = primary_fx_slot_index.get();
+        const auto fx_slot_index = primary_fx_slot_index.value();
         eax_active_fx_slots_[fx_slot_index] = true;
 
         auto& fx_slot = eax_al_context_->eax_get_fx_slot(fx_slot_index);
@@ -4143,6 +4154,13 @@ const char* ALsource::eax_get_occlusion_room_ratio_name() noexcept
     return "Occlusion Room Ratio";
 }
 
+void ALsource::eax1_validate_reverb_mix(float reverb_mix)
+{
+    if (reverb_mix == EAX_REVERBMIX_USEDISTANCE)
+        return;
+
+    eax_validate_range<EaxSourceSendException>("Reverb Mix", reverb_mix, EAX_BUFFER_MINREVERBMIX, EAX_BUFFER_MAXREVERBMIX);
+}
 
 void ALsource::eax_validate_send_receiving_fx_slot_guid(
     const GUID& guidReceivingFXSlotID)
@@ -5067,6 +5085,32 @@ void ALsource::eax_defer_source_speaker_level_all(
     }
 }
 
+void ALsource::eax1_set_efx()
+{
+    const auto primary_fx_slot_index = eax_al_context_->eax_get_primary_fx_slot_index();
+
+    if (!primary_fx_slot_index.has_value())
+        return;
+
+    WetGainAuto = (eax1_.fMix == EAX_REVERBMIX_USEDISTANCE);
+    const auto filter_gain = (WetGainAuto ? 1.0F : eax1_.fMix);
+    auto& fx_slot = eax_al_context_->eax_get_fx_slot(*primary_fx_slot_index);
+    eax_set_al_source_send(&fx_slot, *primary_fx_slot_index, EaxAlLowPassParam{filter_gain, 1.0F});
+    mPropsDirty = true;
+}
+
+void ALsource::eax1_set_reverb_mix(const EaxEaxCall& eax_call)
+{
+    const auto reverb_mix = eax_call.get_value<EaxSourceException, const decltype(EAXBUFFER_REVERBPROPERTIES::fMix)>();
+    eax1_validate_reverb_mix(reverb_mix);
+
+    if (eax1_.fMix == reverb_mix)
+        return;
+
+    eax1_.fMix = reverb_mix;
+    eax1_set_efx();
+}
+
 void ALsource::eax_defer_source_direct(
     const EaxEaxCall& eax_call)
 {
@@ -5400,6 +5444,20 @@ void ALsource::eax_set_speaker_levels()
     // TODO
 }
 
+void ALsource::eax1_set(const EaxEaxCall& eax_call)
+{
+    switch (eax_call.get_property_id())
+    {
+        case DSPROPERTY_EAXBUFFER_ALL:
+        case DSPROPERTY_EAXBUFFER_REVERBMIX:
+            eax1_set_reverb_mix(eax_call);
+            break;
+
+        default:
+            eax_fail("Unsupported property id.");
+    }
+}
+
 void ALsource::eax_apply_deferred()
 {
     if (!eax_are_active_fx_slots_dirty_ &&
@@ -5477,7 +5535,7 @@ void ALsource::eax_apply_deferred()
             eax_set_macro_fx_factor();
         }
 
-        mPropsDirty.set(std::memory_order_release);
+        mPropsDirty = true;
 
         eax_source_dirty_misc_flags_ = EaxSourceSourceMiscDirtyFlags{};
     }
@@ -5489,6 +5547,12 @@ void ALsource::eax_apply_deferred()
 void ALsource::eax_set(
     const EaxEaxCall& eax_call)
 {
+    if (eax_call.get_version() == 1)
+    {
+        eax1_set(eax_call);
+        return;
+    }
+
     switch (eax_call.get_property_id())
     {
         case EAXSOURCE_NONE:
@@ -5618,10 +5682,10 @@ void ALsource::eax_set(
             eax_fail("Unsupported property id.");
     }
 
-    if (!eax_call.is_deferred())
+    if(!eax_call.is_deferred())
     {
         eax_apply_deferred();
-        UpdateSourceProps(this, eax_al_context_);
+        EaxUpdateSourceVoice(this, eax_al_context_);
     }
 }
 
@@ -5707,6 +5771,20 @@ void ALsource::eax_copy_send(
     dst_send.flExclusionLFRatio = src_send.flExclusionLFRatio;
 }
 
+void ALsource::eax1_get(const EaxEaxCall& eax_call)
+{
+    switch (eax_call.get_property_id())
+    {
+        case DSPROPERTY_EAXBUFFER_ALL:
+        case DSPROPERTY_EAXBUFFER_REVERBMIX:
+            eax_call.set_value<EaxSourceException>(eax1_);
+            break;
+
+        default:
+            eax_fail("Unsupported property id.");
+    }
+}
+
 void ALsource::eax_api_get_source_all_v2(
     const EaxEaxCall& eax_call)
 {
@@ -5766,13 +5844,9 @@ void ALsource::eax_api_get_source_all(
 void ALsource::eax_api_get_source_all_obstruction(
     const EaxEaxCall& eax_call)
 {
-    static_assert(
-        offsetof(EAXOBSTRUCTIONPROPERTIES, flObstructionLFRatio) - offsetof(EAXOBSTRUCTIONPROPERTIES, lObstruction) ==
-        offsetof(EAX30SOURCEPROPERTIES, flObstructionLFRatio) - offsetof(EAX30SOURCEPROPERTIES, lObstruction),
-        "Type size."
-    );
-
-    const auto eax_obstruction_all = *reinterpret_cast<const EAXOBSTRUCTIONPROPERTIES*>(&eax_.source.lObstruction);
+    auto eax_obstruction_all = EAXOBSTRUCTIONPROPERTIES{};
+    eax_obstruction_all.lObstruction = eax_.source.lObstruction;
+    eax_obstruction_all.flObstructionLFRatio = eax_.source.flObstructionLFRatio;
 
     eax_call.set_value<EaxSourceException>(eax_obstruction_all);
 }
@@ -5780,20 +5854,11 @@ void ALsource::eax_api_get_source_all_obstruction(
 void ALsource::eax_api_get_source_all_occlusion(
     const EaxEaxCall& eax_call)
 {
-    static_assert(
-        offsetof(EAXOCCLUSIONPROPERTIES, flOcclusionLFRatio) - offsetof(EAXOCCLUSIONPROPERTIES, lOcclusion) ==
-        offsetof(EAX30SOURCEPROPERTIES, flOcclusionLFRatio) - offsetof(EAX30SOURCEPROPERTIES, lOcclusion) &&
-
-        offsetof(EAXOCCLUSIONPROPERTIES, flOcclusionRoomRatio) - offsetof(EAXOCCLUSIONPROPERTIES, lOcclusion) ==
-        offsetof(EAX30SOURCEPROPERTIES, flOcclusionRoomRatio) - offsetof(EAX30SOURCEPROPERTIES, lOcclusion) &&
-
-        offsetof(EAXOCCLUSIONPROPERTIES, flOcclusionDirectRatio) - offsetof(EAXOCCLUSIONPROPERTIES, lOcclusion) ==
-        offsetof(EAX30SOURCEPROPERTIES, flOcclusionDirectRatio) - offsetof(EAX30SOURCEPROPERTIES, lOcclusion),
-
-        "Type size."
-    );
-
-    const auto eax_occlusion_all = *reinterpret_cast<const EAXOCCLUSIONPROPERTIES*>(&eax_.source.lOcclusion);
+    auto eax_occlusion_all = EAXOCCLUSIONPROPERTIES{};
+    eax_occlusion_all.lOcclusion = eax_.source.lOcclusion;
+    eax_occlusion_all.flOcclusionLFRatio = eax_.source.flOcclusionLFRatio;
+    eax_occlusion_all.flOcclusionRoomRatio = eax_.source.flOcclusionRoomRatio;
+    eax_occlusion_all.flOcclusionDirectRatio = eax_.source.flOcclusionDirectRatio;
 
     eax_call.set_value<EaxSourceException>(eax_occlusion_all);
 }
@@ -5801,14 +5866,9 @@ void ALsource::eax_api_get_source_all_occlusion(
 void ALsource::eax_api_get_source_all_exclusion(
     const EaxEaxCall& eax_call)
 {
-    static_assert(
-        offsetof(EAXEXCLUSIONPROPERTIES, flExclusionLFRatio) - offsetof(EAXEXCLUSIONPROPERTIES, lExclusion) ==
-        offsetof(EAX30SOURCEPROPERTIES, flExclusionLFRatio) - offsetof(EAX30SOURCEPROPERTIES, lExclusion),
-
-        "Type size."
-    );
-
-    const auto eax_exclusion_all = *reinterpret_cast<const EAXEXCLUSIONPROPERTIES*>(&eax_.source.lExclusion);
+    auto eax_exclusion_all = EAXEXCLUSIONPROPERTIES{};
+    eax_exclusion_all.lExclusion = eax_.source.lExclusion;
+    eax_exclusion_all.flExclusionLFRatio = eax_.source.flExclusionLFRatio;
 
     eax_call.set_value<EaxSourceException>(eax_exclusion_all);
 }
@@ -5863,6 +5923,12 @@ void ALsource::eax_api_get_source_speaker_level_all(
 void ALsource::eax_get(
     const EaxEaxCall& eax_call)
 {
+    if (eax_call.get_version() == 1)
+    {
+        eax1_get(eax_call);
+        return;
+    }
+
     switch (eax_call.get_property_id())
     {
         case EAXSOURCE_NONE:
@@ -6012,7 +6078,8 @@ void ALsource::eax_set_al_source_send(
     if(auto *oldslot = send.Slot)
         DecrementRef(oldslot->ref);
     send.Slot = slot;
-    mPropsDirty.set(std::memory_order_release);
+
+    mPropsDirty = true;
 }
 
 #endif // ALSOFT_EAX

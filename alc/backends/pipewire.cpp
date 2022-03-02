@@ -342,7 +342,7 @@ public:
         return *this;
     }
 
-    operator bool() const noexcept { return mLoop != nullptr; }
+    explicit operator bool() const noexcept { return mLoop != nullptr; }
 
     auto start() const { return pw_thread_loop_start(mLoop); }
     auto stop() const { return pw_thread_loop_stop(mLoop); }
@@ -568,7 +568,12 @@ DeviceNode *DeviceNode::Find(uint32_t id)
 void DeviceNode::Remove(uint32_t id)
 {
     auto match_id = [id](DeviceNode &n) noexcept -> bool
-    { return n.mId == id; };
+    {
+        if(n.mId != id)
+            return false;
+        TRACE("Removing device \"%s\"\n", n.mDevName.c_str());
+        return true;
+    };
 
     auto end = std::remove_if(sList.begin(), sList.end(), match_id);
     sList.erase(end, sList.end());
@@ -691,10 +696,10 @@ void DeviceNode::parseSampleRate(const spa_pod *value) noexcept
 
 void DeviceNode::parsePositions(const spa_pod *value) noexcept
 {
-    mIs51Rear = false;
-
     const auto chanmap = get_array_span<SPA_TYPE_Id>(value);
     if(chanmap.empty()) return;
+
+    mIs51Rear = false;
 
     if(MatchChannelMap(chanmap, X71Map))
         mChannels = DevFmtX71;
@@ -719,11 +724,11 @@ void DeviceNode::parsePositions(const spa_pod *value) noexcept
 
 void DeviceNode::parseChannelCount(const spa_pod *value) noexcept
 {
-    mIs51Rear = false;
-
     /* As a fallback with just a channel count, just assume mono or stereo. */
     const auto chancount = get_value<SPA_TYPE_Int>(value);
     if(!chancount) return;
+
+    mIs51Rear = false;
 
     if(*chancount >= 2)
         mChannels = DevFmtStereo;
@@ -739,6 +744,7 @@ constexpr auto MonitorPrefixLen = al::size(MonitorPrefix) - 1;
 constexpr char AudioSinkClass[]{"Audio/Sink"};
 constexpr char AudioSourceClass[]{"Audio/Source"};
 constexpr char AudioDuplexClass[]{"Audio/Duplex"};
+constexpr char StreamClass[]{"Stream/"};
 
 /* A generic PipeWire node proxy object used to track changes to sink and
  * source nodes.
@@ -812,21 +818,14 @@ void NodeProxy::infoCallback(const pw_node_info *info)
             return;
         }
 
-        bool isHeadphones{};
-        if(const char *form_factor{spa_dict_lookup(info->props, PW_KEY_DEVICE_FORM_FACTOR)})
-        {
-            if(al::strcasecmp(form_factor, "headphones") == 0
-                || al::strcasecmp(form_factor, "headset") == 0)
-                isHeadphones = true;
-        }
-
         const char *devName{spa_dict_lookup(info->props, PW_KEY_NODE_NAME)};
         const char *nodeName{spa_dict_lookup(info->props, PW_KEY_NODE_DESCRIPTION)};
         if(!nodeName || !*nodeName) nodeName = spa_dict_lookup(info->props, PW_KEY_NODE_NICK);
         if(!nodeName || !*nodeName) nodeName = devName;
 
-        TRACE("Got %s device \"%s\"%s\n", AsString(ntype), devName ? devName : "(nil)",
-            isHeadphones ? " (headphones)" : "");
+        const char *form_factor{spa_dict_lookup(info->props, PW_KEY_DEVICE_FORM_FACTOR)};
+        TRACE("Got %s device \"%s\"%s%s%s\n", AsString(ntype), devName ? devName : "(nil)",
+            form_factor?" (":"", form_factor?form_factor:"", form_factor?")":"");
         TRACE("  \"%s\" = ID %u\n", nodeName ? nodeName : "(nil)", info->id);
 
         DeviceNode &node = DeviceNode::Add(info->id);
@@ -834,7 +833,8 @@ void NodeProxy::infoCallback(const pw_node_info *info)
         else node.mName = "PipeWire node #"+std::to_string(info->id);
         node.mDevName = devName ? devName : "";
         node.mType = ntype;
-        node.mIsHeadphones = isHeadphones;
+        node.mIsHeadphones = form_factor && (al::strcasecmp(form_factor, "headphones") == 0
+            || al::strcasecmp(form_factor, "headset") == 0);
     }
 }
 
@@ -1051,7 +1051,8 @@ void EventManager::addCallback(uint32_t id, uint32_t, const char *type, uint32_t
             || al::strcasecmp(media_class, AudioDuplexClass) == 0};
         if(!isGood)
         {
-            if(std::strstr(media_class, "/Video") == nullptr)
+            if(std::strstr(media_class, "/Video") == nullptr
+                && std::strncmp(media_class, StreamClass, sizeof(StreamClass)-1) != 0)
                 TRACE("Ignoring node class %s\n", media_class);
             return;
         }

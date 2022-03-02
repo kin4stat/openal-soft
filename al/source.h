@@ -187,7 +187,7 @@ struct ALsource {
     /** Source Buffer Queue head. */
     al::deque<ALbufferQueueItem> mQueue;
 
-    al::atomic_invflag mPropsDirty;
+    bool mPropsDirty{true};
 
     /* Index into the context's Voices array. Lazily updated, only checked and
      * reset when looking up the voice.
@@ -220,8 +220,10 @@ public:
     void eax_update(
         EaxContextSharedDirtyFlags dirty_flags);
 
-    void eax_commit();
+    void eax_commit() { eax_apply_deferred(); }
     void eax_commit_and_update();
+
+    bool eax_is_initialized() const noexcept { return eax_al_context_; }
 
 
     static ALsource* eax_lookup_source(
@@ -235,7 +237,6 @@ private:
 
     using EaxActiveFxSlots = std::array<bool, EAX_MAX_FXSLOTS>;
     using EaxSpeakerLevels = std::array<long, eax_max_speakers>;
-
 
     struct Eax
     {
@@ -254,6 +255,7 @@ private:
 
     ALCcontext* eax_al_context_{};
 
+    EAXBUFFER_REVERBPROPERTIES eax1_{};
     Eax eax_{};
     Eax eax_d_{};
     EaxActiveFxSlots eax_active_fx_slots_{};
@@ -267,8 +269,6 @@ private:
     static void eax_fail(
         const char* message);
 
-
-    bool eax_is_initialized() const noexcept { return eax_al_context_; }
 
     void eax_set_source_defaults() noexcept;
     void eax_set_active_fx_slots_defaults() noexcept;
@@ -319,6 +319,8 @@ private:
 
     static const char* eax_get_occlusion_room_ratio_name() noexcept;
 
+
+    static void eax1_validate_reverb_mix(float reverb_mix);
 
     static void eax_validate_send_receiving_fx_slot_guid(
         const GUID& guidReceivingFXSlotID);
@@ -702,6 +704,10 @@ private:
     void eax_set_speaker_levels();
 
 
+    void eax1_set_efx();
+    void eax1_set_reverb_mix(const EaxEaxCall& eax_call);
+    void eax1_set(const EaxEaxCall& eax_call);
+
     void eax_apply_deferred();
 
     void eax_set(
@@ -750,6 +756,8 @@ private:
         }
     }
 
+
+    void eax1_get(const EaxEaxCall& eax_call);
 
     void eax_api_get_source_all_v2(
         const EaxEaxCall& eax_call);

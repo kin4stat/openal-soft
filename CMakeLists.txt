@@ -95,7 +95,7 @@ option(ALSOFT_INSTALL_EXAMPLES "Install example programs (alplay, alstream, ...)
 option(ALSOFT_INSTALL_UTILS "Install utility programs (openal-info, alsoft-config, ...)" ON)
 option(ALSOFT_UPDATE_BUILD_VERSION "Update git build version info" ON)
 
-option(ALSOFT_EAX "Enable EAX extensions." $<BOOL:WIN32>)
+option(ALSOFT_EAX "Enable legacy EAX extensions" ${WIN32})
 
 if(DEFINED SHARE_INSTALL_DIR)
     message(WARNING "SHARE_INSTALL_DIR is deprecated.  Use the variables provided by the GNUInstallDirs module instead")
@@ -566,51 +566,11 @@ if(NOT WIN32)
         check_symbol_exists(pthread_setname_np "pthread.h;pthread_np.h" HAVE_PTHREAD_SETNAME_NP)
         if(NOT HAVE_PTHREAD_SETNAME_NP)
             check_symbol_exists(pthread_set_name_np "pthread.h;pthread_np.h" HAVE_PTHREAD_SET_NAME_NP)
-        else()
-            check_c_source_compiles("
-#include <pthread.h>
-#include <pthread_np.h>
-int main()
-{
-    pthread_setname_np(\"testname\");
-    return 0;
-}"
-                PTHREAD_SETNAME_NP_ONE_PARAM
-            )
-            check_c_source_compiles("
-#include <pthread.h>
-#include <pthread_np.h>
-int main()
-{
-    pthread_setname_np(pthread_self(), \"%s\", \"testname\");
-    return 0;
-}"
-                PTHREAD_SETNAME_NP_THREE_PARAMS
-            )
         endif()
     else()
         check_symbol_exists(pthread_setname_np pthread.h HAVE_PTHREAD_SETNAME_NP)
         if(NOT HAVE_PTHREAD_SETNAME_NP)
             check_symbol_exists(pthread_set_name_np pthread.h HAVE_PTHREAD_SET_NAME_NP)
-        else()
-            check_c_source_compiles("
-#include <pthread.h>
-int main()
-{
-    pthread_setname_np(\"testname\");
-    return 0;
-}"
-                PTHREAD_SETNAME_NP_ONE_PARAM
-            )
-            check_c_source_compiles("
-#include <pthread.h>
-int main()
-{
-    pthread_setname_np(pthread_self(), \"%s\", \"testname\");
-    return 0;
-}"
-                PTHREAD_SETNAME_NP_THREE_PARAMS
-            )
         endif()
     endif()
 endif()
@@ -1472,32 +1432,30 @@ if(HAS_ROUTER)
     message(STATUS "Building DLL router")
 endif()
 
-message(STATUS "
-Building OpenAL with support for the following backends:
-    ${BACKENDS}
-
-Building with support for CPU extensions:
-    ${CPU_EXTS}
-")
+message(STATUS "")
+message(STATUS "Building OpenAL with support for the following backends:")
+message(STATUS "   ${BACKENDS}")
+message(STATUS "")
+message(STATUS "Building with support for CPU extensions:")
+message(STATUS "    ${CPU_EXTS}")
+message(STATUS "")
 if(FPMATH_SET)
-    message(STATUS "Building with SSE${FPMATH_SET} codegen
-")
+    message(STATUS "Building with SSE${FPMATH_SET} codegen")
+    message(STATUS "")
 endif()
 
 if(ALSOFT_EAX)
-    message(STATUS "Building with deprecated EAX extensions
-")
+    message(STATUS "Building with legacy EAX extension support")
+    message(STATUS "")
 endif()
 
 if(ALSOFT_EMBED_HRTF_DATA)
-    message(STATUS "Embedding HRTF datasets
-")
+    message(STATUS "Embedding HRTF datasets")
+    message(STATUS "")
 endif()
 
-if(ALSOFT_EAX)
-    message(STATUS "Enabled deprecated EAX extensions
-")
-endif()
+# An alias for sub-project builds
+add_library(OpenAL::OpenAL ALIAS OpenAL)
 
 # Install main library
 if(ALSOFT_INSTALL)

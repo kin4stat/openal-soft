@@ -102,8 +102,8 @@ struct ALCcontext : public al::intrusive_ref<ALCcontext>, ContextBase {
     al::vector<WetBufferPtr> mWetBuffers;
 
 
-    al::atomic_invflag mPropsDirty;
-    std::atomic<bool> mDeferUpdates{false};
+    bool mPropsDirty{true};
+    bool mDeferUpdates{false};
 
     std::mutex mPropLock;
 
@@ -155,8 +155,7 @@ struct ALCcontext : public al::intrusive_ref<ALCcontext>, ContextBase {
      * This does *NOT* stop mixing, but rather prevents certain property
      * changes from taking effect. mPropLock must be held when called.
      */
-    bool deferUpdates() noexcept
-    { return mDeferUpdates.exchange(true, std::memory_order_acq_rel); }
+    void deferUpdates() noexcept { mDeferUpdates = true; }
 
     /**
      * Resumes update processing after being deferred. mPropLock must be held
@@ -164,7 +163,7 @@ struct ALCcontext : public al::intrusive_ref<ALCcontext>, ContextBase {
      */
     void processUpdates()
     {
-        if(mDeferUpdates.exchange(false, std::memory_order_acq_rel))
+        if(std::exchange(mDeferUpdates, false))
             applyAllUpdates();
     }
 
@@ -243,14 +242,11 @@ public:
 
     void eax_update_filters();
 
-    void eax_commit_sources();
     void eax_commit_and_update_sources();
 
 
     void eax_set_last_error() noexcept;
 
-
-    float eax_get_max_filter_gain() const noexcept { return eax_max_filter_gain_; }
 
     EaxFxSlotIndex eax_get_previous_primary_fx_slot_index() const noexcept
     { return eax_previous_primary_fx_slot_index_; }
@@ -264,68 +260,6 @@ public:
 
 
 private:
-    using SourceList = al::vector<SourceSubList>;
-
-
-    struct SourceListIteratorBeginTag{};
-    struct SourceListIteratorEndTag{};
-
-    class SourceListIterator
-    {
-    public:
-        SourceListIterator(
-            SourceList& sources,
-            SourceListIteratorBeginTag) noexcept;
-
-        SourceListIterator(
-            SourceList& sources,
-            SourceListIteratorEndTag) noexcept;
-
-        SourceListIterator(
-            const SourceListIterator& rhs);
-
-        SourceListIterator& operator=(
-            const SourceListIterator& rhs) = delete;
-
-        SourceListIterator& operator++();
-
-        ALsource& operator*() noexcept;
-
-        bool operator==(
-            const SourceListIterator& rhs) const noexcept;
-
-        bool operator!=(
-            const SourceListIterator& rhs) const noexcept;
-
-
-    private:
-        SourceList::iterator sub_list_iterator_;
-        SourceList::iterator sub_list_end_iterator_;
-        std::uint64_t sub_list_item_index_;
-    }; // SourceListIterator
-
-    class SourceListEnumerator
-    {
-    public:
-        explicit SourceListEnumerator(
-            SourceList& sources) noexcept;
-
-        SourceListEnumerator(
-            const SourceListEnumerator& rhs) = delete;
-
-        SourceListEnumerator& operator=(
-            const SourceListEnumerator& rhs) = delete;
-
-        SourceListIterator begin() noexcept;
-
-        SourceListIterator end() noexcept;
-
-
-    private:
-        SourceList& sources_;
-    }; // SourceListEnumerator
-
-
     struct Eax
     {
         EAX50CONTEXTPROPERTIES context{};
@@ -339,7 +273,6 @@ private:
     long eax_last_error_{};
     unsigned long eax_speaker_config_{};
 
-    float eax_max_filter_gain_{};
     EaxFxSlotIndex eax_previous_primary_fx_slot_index_{};
     EaxFxSlotIndex eax_primary_fx_slot_index_{};
     EaxFxSlots eax_fx_slots_{};
@@ -379,8 +312,6 @@ private:
     unsigned long eax_detect_speaker_configuration() const;
     void eax_update_speaker_configuration();
 
-
-    void eax_initialize_filter_gain();
 
     void eax_set_last_error_defaults() noexcept;
 

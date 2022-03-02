@@ -120,7 +120,7 @@ constexpr DWORD X51RearMask{MaskFromTopBits(X5DOT1REAR)};
 constexpr DWORD X61Mask{MaskFromTopBits(X6DOT1)};
 constexpr DWORD X71Mask{MaskFromTopBits(X7DOT1)};
 
-constexpr char DevNameHead[] = "OpenAL Soft on ";
+constexpr char DevNameHead[] = "";
 constexpr size_t DevNameHeadLen{al::size(DevNameHead) - 1};
 
 

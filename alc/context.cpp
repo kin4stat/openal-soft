@@ -65,14 +65,13 @@ constexpr ALchar alExtList[] =
     "AL_SOFT_bformat_ex "
     "AL_SOFTX_bformat_hoa "
     "AL_SOFT_block_alignment "
-    "AL_SOFTX_callback_buffer "
+    "AL_SOFT_callback_buffer "
     "AL_SOFTX_convolution_reverb "
     "AL_SOFT_deferred_updates "
     "AL_SOFT_direct_channels "
     "AL_SOFT_direct_channels_remix "
     "AL_SOFT_effect_target "
     "AL_SOFT_events "
-    "AL_SOFTX_filter_gain_ex "
     "AL_SOFT_gain_clamp_ex "
     "AL_SOFTX_hold_on_disconnect "
     "AL_SOFT_loop_points "
@@ -333,11 +332,10 @@ ALenum ALCcontext::eax_eax_set(
 {
     eax_initialize();
 
-    constexpr auto deferred_flag = 0x80000000u;
     const auto eax_call = create_eax_call(
         false,
         property_set_id,
-        property_id | (mDeferUpdates ? deferred_flag : 0u),
+        property_id,
         property_source_id,
         property_value,
         property_value_size
@@ -363,6 +361,10 @@ ALenum ALCcontext::eax_eax_set(
         default:
             eax_fail("Unsupported property set id.");
     }
+
+    static constexpr auto deferred_flag = 0x80000000u;
+    if(!(property_id&deferred_flag) && !mDeferUpdates)
+        applyAllUpdates();
 
     return AL_NO_ERROR;
 }
@@ -773,7 +775,7 @@ void ALCcontext::eax_set_distance_factor()
 
 void ALCcontext::eax_set_air_absorbtion_hf()
 {
-    mAirAbsorptionGainHF = eax_.context.flAirAbsorptionHF;
+    mAirAbsorptionGainHF = level_mb_to_gain(eax_.context.flAirAbsorptionHF);
     mPropsDirty = true;
 }
 
@@ -1137,22 +1139,6 @@ void ALCcontext::eax_set(
         default:
             eax_fail("Unsupported property id.");
     }
-
-    if(!eax_call.is_deferred())
-    {
-        eax_apply_deferred();
-
-        mHoldUpdates.store(true, std::memory_order_release);
-        while((mUpdateCount.load(std::memory_order_acquire)&1) != 0) {
-            /* busy-wait */
-        }
-
-        if(std::exchange(mPropsDirty, false))
-            UpdateContextProps(this);
-        UpdateAllSourceProps(this);
-
-        mHoldUpdates.store(false, std::memory_order_release);
-    }
 }
 
 void ALCcontext::eax_apply_deferred()
@@ -1249,7 +1235,7 @@ void eax_fail_get(
 } // namespace
 
 
-ALenum AL_APIENTRY EAXSet(
+FORCE_ALIGN ALenum AL_APIENTRY EAXSet(
     const GUID* property_set_id,
     ALuint property_id,
     ALuint property_source_id,
@@ -1280,7 +1266,7 @@ catch (...)
     return AL_INVALID_OPERATION;
 }
 
-ALenum AL_APIENTRY EAXGet(
+FORCE_ALIGN ALenum AL_APIENTRY EAXGet(
     const GUID* property_set_id,
     ALuint property_id,
     ALuint property_source_id,

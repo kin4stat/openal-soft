@@ -355,10 +355,7 @@ void DoHrtfMix(const float *samples, const uint DstBufferSize, DirectParams &par
 {
     const uint IrSize{Device->mIrSize};
     auto &HrtfSamples = Device->HrtfSourceData;
-    /* Source HRTF mixing needs to include the direct delay so it remains
-     * aligned with the direct mix's HRTF filtering.
-     */
-    float2 *AccumSamples{Device->HrtfAccumData + HrtfDirectDelay};
+    auto &AccumSamples = Device->HrtfAccumData;
 
     /* Copy the HRTF history and new input samples into a temp buffer. */
     auto src_iter = std::copy(parms.Hrtf.History.begin(), parms.Hrtf.History.end(),
@@ -385,7 +382,7 @@ void DoHrtfMix(const float *samples, const uint DstBufferSize, DirectParams &par
         if(Counter > fademix)
         {
             const float a{static_cast<float>(fademix) / static_cast<float>(Counter)};
-            gain = lerp(parms.Hrtf.Old.Gain, TargetGain, a);
+            gain = lerpf(parms.Hrtf.Old.Gain, TargetGain, a);
         }
 
         MixHrtfFilter hrtfparams{
@@ -412,7 +409,7 @@ void DoHrtfMix(const float *samples, const uint DstBufferSize, DirectParams &par
         if(Counter > DstBufferSize)
         {
             const float a{static_cast<float>(todo) / static_cast<float>(Counter-fademix)};
-            gain = lerp(parms.Hrtf.Old.Gain, TargetGain, a);
+            gain = lerpf(parms.Hrtf.Old.Gain, TargetGain, a);
         }
 
         MixHrtfFilter hrtfparams{

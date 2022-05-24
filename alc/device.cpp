@@ -68,6 +68,9 @@ void ALCdevice::enumerateHrtfs()
 
 auto ALCdevice::getOutputMode1() const noexcept -> OutputMode1
 {
+    if(mContexts.load(std::memory_order_relaxed)->empty())
+        return OutputMode1::Any;
+
     switch(FmtChans)
     {
     case DevFmtMono: return OutputMode1::Mono;
@@ -81,6 +84,7 @@ auto ALCdevice::getOutputMode1() const noexcept -> OutputMode1
     case DevFmtX51: return OutputMode1::X51;
     case DevFmtX61: return OutputMode1::X61;
     case DevFmtX71: return OutputMode1::X71;
+    case DevFmtX3D71:
     case DevFmtAmbi3D: break;
     }
     return OutputMode1::Any;

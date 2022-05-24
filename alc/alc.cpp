@@ -156,8 +156,8 @@
 #endif
 
 #ifdef ALSOFT_EAX
-#include "al/eax_globals.h"
-#include "al/eax_x_ram.h"
+#include "al/eax/globals.h"
+#include "al/eax/x_ram.h"
 #endif // ALSOFT_EAX
 
 
@@ -541,6 +541,9 @@ constexpr struct {
     DECL(ALC_STEREO_BASIC_SOFT),
     DECL(ALC_STEREO_UHJ_SOFT),
     DECL(ALC_STEREO_HRTF_SOFT),
+    DECL(ALC_SURROUND_5_1_SOFT),
+    DECL(ALC_SURROUND_6_1_SOFT),
+    DECL(ALC_SURROUND_7_1_SOFT),
 
     DECL(ALC_NO_ERROR),
     DECL(ALC_INVALID_DEVICE),
@@ -964,7 +967,7 @@ constexpr ALCchar alcExtensionList[] =
     "ALC_SOFT_loopback "
     "ALC_SOFT_loopback_bformat "
     "ALC_SOFT_output_limiter "
-    "ALC_SOFTX_output_mode "
+    "ALC_SOFT_output_mode "
     "ALC_SOFT_pause_device "
     "ALC_SOFT_reopen_device";
 constexpr int alcMajorVersion{1};
@@ -1438,6 +1441,8 @@ ALCenum EnumFromDevFmt(DevFmtChannels channels)
     case DevFmtX61: return ALC_6POINT1_SOFT;
     case DevFmtX71: return ALC_7POINT1_SOFT;
     case DevFmtAmbi3D: return ALC_BFORMAT3D_SOFT;
+    /* FIXME: Shouldn't happen. */
+    case DevFmtX3D71: break;
     }
     throw std::runtime_error{"Invalid DevFmtChannels: "+std::to_string(int(channels))};
 }
@@ -1908,6 +1913,7 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
                 { "surround51", DevFmtX51,    0 },
                 { "surround61", DevFmtX61,    0 },
                 { "surround71", DevFmtX71,    0 },
+                { "surround3d71", DevFmtX3D71, 0 },
                 { "surround51rear", DevFmtX51, 0 },
                 { "ambi1", DevFmtAmbi3D, 1 },
                 { "ambi2", DevFmtAmbi3D, 2 },
@@ -2087,6 +2093,7 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
     case DevFmtX51: device->RealOut.RemixMap = X51Downmix; break;
     case DevFmtX61: device->RealOut.RemixMap = X61Downmix; break;
     case DevFmtX71: device->RealOut.RemixMap = X71Downmix; break;
+    case DevFmtX3D71: device->RealOut.RemixMap = X51Downmix; break;
     case DevFmtAmbi3D: break;
     }
 
@@ -2099,7 +2106,7 @@ ALCenum UpdateDeviceParams(ALCdevice *device, const int *attrList)
             sample_delay += FrontStablizer::DelayLength;
     }
 
-    if(device->getConfigValueBool(nullptr, "dither", 1))
+    if(device->getConfigValueBool(nullptr, "dither", true))
     {
         int depth{device->configValue<int>(nullptr, "dither-depth").value_or(0)};
         if(depth <= 0)
@@ -2700,8 +2707,8 @@ static size_t GetIntegerv(ALCdevice *device, ALCenum param, const al::span<int> 
     auto NumAttrsForDevice = [](ALCdevice *aldev) noexcept
     {
         if(aldev->Type == DeviceType::Loopback && aldev->FmtChans == DevFmtAmbi3D)
-            return 35;
-        return 29;
+            return 37;
+        return 31;
     };
     switch(param)
     {
@@ -2775,6 +2782,9 @@ static size_t GetIntegerv(ALCdevice *device, ALCenum param, const al::span<int> 
 
             values[i++] = ALC_MAX_AMBISONIC_ORDER_SOFT;
             values[i++] = MaxAmbiOrder;
+
+            values[i++] = ALC_OUTPUT_MODE_SOFT;
+            values[i++] = static_cast<ALCenum>(device->getOutputMode1());
 
             values[i++] = 0;
         }
@@ -2942,8 +2952,8 @@ START_API_FUNC
     auto NumAttrsForDevice = [](ALCdevice *aldev) noexcept
     {
         if(aldev->Type == DeviceType::Loopback && aldev->FmtChans == DevFmtAmbi3D)
-            return 39;
-        return 33;
+            return 41;
+        return 35;
     };
     std::lock_guard<std::mutex> _{dev->StateLock};
     switch(pname)
@@ -3014,6 +3024,9 @@ START_API_FUNC
 
             values[i++] = ALC_DEVICE_LATENCY_SOFT;
             values[i++] = clock.Latency.count();
+
+            values[i++] = ALC_OUTPUT_MODE_SOFT;
+            values[i++] = static_cast<ALCenum>(device->getOutputMode1());
 
             values[i++] = 0;
         }

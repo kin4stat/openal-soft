@@ -20,7 +20,7 @@
 #include "vector.h"
 
 #ifdef ALSOFT_EAX
-#include "al/eax_x_ram.h"
+#include "al/eax/x_ram.h"
 #endif // ALSOFT_EAX
 
 struct ALbuffer;
@@ -105,9 +105,9 @@ struct ALCdevice : public al::intrusive_ref<ALCdevice>, DeviceBase {
         Uhj2 = ALC_STEREO_UHJ_SOFT,
         Hrtf = ALC_STEREO_HRTF_SOFT,
         Quad = ALC_QUAD_SOFT,
-        X51 = ALC_5POINT1_SOFT,
-        X61 = ALC_6POINT1_SOFT,
-        X71 = ALC_7POINT1_SOFT
+        X51 = ALC_SURROUND_5_1_SOFT,
+        X61 = ALC_SURROUND_6_1_SOFT,
+        X71 = ALC_SURROUND_7_1_SOFT
     };
     OutputMode1 getOutputMode1() const noexcept;
 
@@ -137,11 +137,11 @@ struct ALCdevice : public al::intrusive_ref<ALCdevice>, DeviceBase {
 
     void enumerateHrtfs();
 
-    bool getConfigValueBool(const char *block, const char *key, int def)
+    bool getConfigValueBool(const char *block, const char *key, bool def)
     { return GetConfigValueBool(DeviceName.c_str(), block, key, def); }
 
     template<typename T>
-    al::optional<T> configValue(const char *block, const char *key) = delete;
+    inline al::optional<T> configValue(const char *block, const char *key) = delete;
 
     DEF_NEWDEL(ALCdevice)
 };
